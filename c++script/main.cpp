@@ -27,6 +27,10 @@
 
 namespace fs = std::filesystem;
 
+// ANSI color codes
+#define CYAN "\033[36m"
+#define RESET "\033[0m"
+
 // ======================
 // Security Critical Section
 // ======================
@@ -70,7 +74,7 @@ bool VerifyPassword(const std::string& username, const std::string& password) {
     char* encrypted = crypt(password.c_str(), sp->sp_pwdp);
     if (!encrypted) return false;
 
-    bool match = (strcmp(encrypted, sp->sp_pwdp) == 0;
+    bool match = (strcmp(encrypted, sp->sp_pwdp) == 0);
 
     if (sp != nullptr && sp->sp_pwdp != pw->pw_passwd) {
         free(sp);
@@ -325,7 +329,7 @@ public:
         Terminal term;
         while (true) {
             term.Clear();
-            std::cout << "=== " << title << " ===\n\n";
+            std::cout << "=== " CYAN "claude Login" RESET " ===\n\n";
 
             for (size_t i = 0; i < options_.size(); ++i) {
                 std::cout << " " << i + 1 << ") " << options_[i].first << "\n";
@@ -338,7 +342,6 @@ public:
         }
     }
 
-private:
     int GetNumericChoice(int min, int max) {
         int choice;
         while (true) {
@@ -354,6 +357,7 @@ private:
         return choice;
     }
 
+private:
     std::vector<std::pair<std::string, std::function<void()>>> options_;
 };
 
@@ -371,13 +375,14 @@ public:
 
     void Run() {
         UI::Terminal term;
-        term.SetTitle("Wayland Login Manager");
+        term.SetTitle("claude Login");
 
         if (config_.autologin) {
             TryAutoLogin();
+            return;
         }
 
-        MainMenu();
+        LoginFlow();
     }
 
 private:
@@ -389,7 +394,6 @@ private:
     };
 
     void LoadConfiguration() {
-        // Check for autologin configuration
         const char* autologin = std::getenv("WLM_AUTOLOGIN_USER");
         if (autologin && *autologin) {
             config_.autologin = true;
@@ -415,68 +419,36 @@ private:
         }
     }
 
-    void MainMenu() {
-        UI::Menu menu;
-        menu.AddOption("Login", [this]() { LoginPrompt(); });
-        menu.AddOption("Select Session", [this]() { SessionMenu(); });
-        menu.AddOption("System Console", []() { 
-            std::system("clear");
-            std::exit(0);
-        });
-
-        menu.Display("Wayland Login Manager");
-    }
-
-    void LoginPrompt() {
+    void LoginFlow() {
         UI::Terminal term;
-        std::string username, password;
-
         term.Clear();
+
+        // 1. Ask for username
+        std::cout << CYAN "claude Login" RESET "\n\n";
         std::cout << "Username: ";
+        std::string username;
         std::getline(std::cin, username);
 
-        password = term.ReadPassword("Password");
-
+        // 2. Verify user exists
         auto user = users_.FindUser(username);
         if (!user) {
-            std::cout << "Invalid username\n";
+            std::cout << "\nInvalid username\n";
             sleep(2);
             return;
         }
 
-        if (!Security::VerifyPassword(username, password)) {
-            std::cout << "Authentication failed\n";
-            sleep(2);
-            return;
-        }
-
-        auto session = sessions_.FindSession(config_.default_session);
-        if (!session) {
-            std::cout << "No valid session found\n";
-            return;
-        }
-
-        LaunchSession(*user, *session);
-    }
-
-    void SessionMenu() {
-        UI::Menu menu;
+        // 3. Show session selection
+        UI::Menu session_menu;
         for (const auto& session : sessions_.GetSessions()) {
-            menu.AddOption(
+            session_menu.AddOption(
                 session.name + (session.is_wayland ? " (Wayland)" : " (X11)"),
-                [this, session]() {
+                [this, user, session]() {
+                    // 4. Ask for password after session selection
                     UI::Terminal term;
-                    std::string username, password;
+                    std::string password = term.ReadPassword("Password");
 
-                    term.Clear();
-                    std::cout << "Username: ";
-                    std::getline(std::cin, username);
-
-                    password = term.ReadPassword("Password");
-
-                    auto user = users_.FindUser(username);
-                    if (!user || !Security::VerifyPassword(username, password)) {
-                        std::cout << "Authentication failed\n";
+                    if (!Security::VerifyPassword(user->username, password)) {
+                        std::cout << "\nAuthentication failed\n";
                         sleep(2);
                         return;
                     }
@@ -486,7 +458,8 @@ private:
             );
         }
 
-        menu.Display("Select Desktop Session");
+        session_menu.AddOption("Cancel", []() {});
+        session_menu.Display("Select Desktop Session for " + username);
     }
 
     void LaunchSession(const User::Info& user, const Desktop::Session& session) {
@@ -504,25 +477,21 @@ private:
     }
 
     void SetupUserEnvironment(const User::Info& user) {
-        // Set basic environment variables
         setenv("HOME", user.home.c_str(), 1);
         setenv("USER", user.username.c_str(), 1);
         setenv("LOGNAME", user.username.c_str(), 1);
         setenv("SHELL", user.shell.c_str(), 1);
         setenv("PATH", "/usr/local/bin:/usr/bin:/bin", 1);
 
-        // Set XDG runtime directory
         std::string xdg_runtime_dir = "/run/user/" + std::to_string(user.uid);
         if (fs::exists(xdg_runtime_dir)) {
             setenv("XDG_RUNTIME_DIR", xdg_runtime_dir.c_str(), 1);
         }
 
-        // Change to user's home directory
         if (chdir(user.home.c_str()) != 0) {
             std::cerr << "Failed to change to home directory: " << strerror(errno) << std::endl;
         }
 
-        // Set user and group IDs
         if (setgid(user.gid) != 0 || setuid(user.uid) != 0) {
             std::cerr << "Failed to switch user: " << strerror(errno) << std::endl;
             std::exit(1);
@@ -530,7 +499,6 @@ private:
     }
 
     void ExecuteSession(const Desktop::Session& session) {
-        // Prepare environment for Wayland or X11
         if (session.is_wayland) {
             unsetenv("DISPLAY");
             setenv("XDG_SESSION_TYPE", "wayland", 1);
@@ -539,7 +507,6 @@ private:
             setenv("XDG_SESSION_TYPE", "x11", 1);
         }
 
-        // Execute the session
         execlp(session.exec.c_str(), session.exec.c_str(), nullptr);
         std::cerr << "Failed to execute session: " << strerror(errno) << std::endl;
         std::exit(1);
